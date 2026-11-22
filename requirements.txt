@@ -1,0 +1,6 @@
+numpy>=1.26.0
+fastapi>=0.110.0
+uvicorn>=0.29.0
+pytest>=8.0.0
+# Uncomment the line below if running on a system with an NVIDIA GPU and CUDA 12.x
+# cupy-cuda12x>=13.0.0
