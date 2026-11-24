@@ -1,12 +1,21 @@
+import time
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from src.gpu_utils import check_hardware_status
+from src.gpu_alignment import gpu_align
+from src.database import init_db, log_alignment_run, fetch_recent_runs
 
 app = FastAPI(
     title="GeneWeaver API",
     description="REST API for GPU-Accelerated CRISPR Sequence Alignment",
-    version="0.1.0"
+    version="0.2.0"
 )
+
+
+@app.on_event("startup")
+def startup_event():
+    """Ensures the SQLite database table is initialized when the API starts."""
+    init_db()
 
 
 class AlignmentRequest(BaseModel):
@@ -26,16 +35,43 @@ def health_check():
 
 @app.post("/api/v1/align")
 def submit_alignment(request: AlignmentRequest):
-    """Validates and accepts a CRISPR alignment job payload."""
+    """Runs parallel CRISPR alignment, logs metrics to SQLite, and returns matches."""
     valid_bases = {"A", "C", "G", "T"}
-    if not set(request.genome_sequence.upper()).issubset(valid_bases):
+    genome = request.genome_sequence.strip().upper()
+    target = request.target_crispr.strip().upper()
+
+    if not set(genome).issubset(valid_bases):
         raise HTTPException(status_code=400, detail="Genome sequence must contain only A, C, G, or T.")
-    if not set(request.target_crispr.upper()).issubset(valid_bases):
+    if not set(target).issubset(valid_bases):
         raise HTTPException(status_code=400, detail="CRISPR sequence must contain only A, C, G, or T.")
+    if len(target) > len(genome):
+        raise HTTPException(status_code=400, detail="Target CRISPR sequence cannot be longer than genome.")
+
+    hardware = check_hardware_status()
+    start_time = time.perf_counter()
+    matches = gpu_align(genome, target, max_mismatches=request.max_mismatches)
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+    run_id = log_alignment_run(
+        target_crispr=target,
+        genome_length=len(genome),
+        max_mismatches=request.max_mismatches,
+        backend=hardware["backend"],
+        execution_ms=elapsed_ms,
+        match_indices=matches
+    )
 
     return {
-        "status": "accepted",
-        "genome_length": len(request.genome_sequence),
-        "target_length": len(request.target_crispr),
-        "max_mismatches": request.max_mismatches
+        "run_id": run_id,
+        "status": "completed",
+        "backend": hardware["backend"],
+        "execution_ms": round(elapsed_ms, 4),
+        "match_count": len(matches),
+        "match_indices": matches
     }
+
+
+@app.get("/api/v1/history")
+def get_alignment_history(limit: int = 10):
+    """Fetches recent CRISPR alignment runs and timing metrics from the database."""
+    return {"runs": fetch_recent_runs(limit=limit)}
