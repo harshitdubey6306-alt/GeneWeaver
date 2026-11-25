@@ -4,11 +4,12 @@ from pydantic import BaseModel, Field
 from src.gpu_utils import check_hardware_status
 from src.gpu_alignment import gpu_align
 from src.database import init_db, log_alignment_run, fetch_recent_runs
+from src.validators import validate_alignment_inputs, SequenceValidationError
 
 app = FastAPI(
     title="GeneWeaver API",
     description="REST API for GPU-Accelerated CRISPR Sequence Alignment",
-    version="0.2.0"
+    version="0.3.0"
 )
 
 
@@ -19,9 +20,10 @@ def startup_event():
 
 
 class AlignmentRequest(BaseModel):
-    genome_sequence: str = Field(..., min_length=1, description="Target DNA genome string (A, C, G, T)")
-    target_crispr: str = Field(..., min_length=1, description="Short CRISPR guide sequence to search for")
+    genome_sequence: str = Field(..., min_length=1, description="Target DNA genome or FASTA text")
+    target_crispr: str = Field(..., min_length=5, description="CRISPR guide sequence to search for")
     max_mismatches: int = Field(default=1, ge=0, le=5, description="Maximum allowed base mismatches")
+    allow_ambiguous: bool = Field(default=False, description="Allow IUPAC ambiguous bases like N")
 
 
 @app.get("/health")
@@ -35,17 +37,16 @@ def health_check():
 
 @app.post("/api/v1/align")
 def submit_alignment(request: AlignmentRequest):
-    """Runs parallel CRISPR alignment, logs metrics to SQLite, and returns matches."""
-    valid_bases = {"A", "C", "G", "T"}
-    genome = request.genome_sequence.strip().upper()
-    target = request.target_crispr.strip().upper()
-
-    if not set(genome).issubset(valid_bases):
-        raise HTTPException(status_code=400, detail="Genome sequence must contain only A, C, G, or T.")
-    if not set(target).issubset(valid_bases):
-        raise HTTPException(status_code=400, detail="CRISPR sequence must contain only A, C, G, or T.")
-    if len(target) > len(genome):
-        raise HTTPException(status_code=400, detail="Target CRISPR sequence cannot be longer than genome.")
+    """Validates genomic inputs, runs parallel alignment, logs metrics, and returns matches."""
+    try:
+        genome, target = validate_alignment_inputs(
+            genome_sequence=request.genome_sequence,
+            target_crispr=request.target_crispr,
+            max_mismatches=request.max_mismatches,
+            allow_ambiguous=request.allow_ambiguous
+        )
+    except SequenceValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
     hardware = check_hardware_status()
     start_time = time.perf_counter()
@@ -74,4 +75,6 @@ def submit_alignment(request: AlignmentRequest):
 @app.get("/api/v1/history")
 def get_alignment_history(limit: int = 10):
     """Fetches recent CRISPR alignment runs and timing metrics from the database."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 100.")
     return {"runs": fetch_recent_runs(limit=limit)}
