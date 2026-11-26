@@ -5,11 +5,12 @@ from src.gpu_utils import check_hardware_status
 from src.gpu_alignment import gpu_align
 from src.database import init_db, log_alignment_run, fetch_recent_runs
 from src.validators import validate_alignment_inputs, SequenceValidationError
+from src.batch_processor import run_batch_alignment
 
 app = FastAPI(
     title="GeneWeaver API",
     description="REST API for GPU-Accelerated CRISPR Sequence Alignment",
-    version="0.3.0"
+    version="0.4.0"
 )
 
 
@@ -22,6 +23,13 @@ def startup_event():
 class AlignmentRequest(BaseModel):
     genome_sequence: str = Field(..., min_length=1, description="Target DNA genome or FASTA text")
     target_crispr: str = Field(..., min_length=5, description="CRISPR guide sequence to search for")
+    max_mismatches: int = Field(default=1, ge=0, le=5, description="Maximum allowed base mismatches")
+    allow_ambiguous: bool = Field(default=False, description="Allow IUPAC ambiguous bases like N")
+
+
+class BatchAlignmentRequest(BaseModel):
+    genome_sequence: str = Field(..., min_length=1, description="Target DNA genome or FASTA text")
+    target_crisprs: list[str] = Field(..., min_length=1, max_length=50, description="List of CRISPR guides")
     max_mismatches: int = Field(default=1, ge=0, le=5, description="Maximum allowed base mismatches")
     allow_ambiguous: bool = Field(default=False, description="Allow IUPAC ambiguous bases like N")
 
@@ -70,6 +78,20 @@ def submit_alignment(request: AlignmentRequest):
         "match_count": len(matches),
         "match_indices": matches
     }
+
+
+@app.post("/api/v1/align/batch")
+def submit_batch_alignment(request: BatchAlignmentRequest):
+    """Executes concurrent alignment across multiple CRISPR guide sequences."""
+    try:
+        return run_batch_alignment(
+            genome_sequence=request.genome_sequence,
+            target_crisprs=request.target_crisprs,
+            max_mismatches=request.max_mismatches,
+            allow_ambiguous=request.allow_ambiguous,
+        )
+    except SequenceValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
 
 @app.get("/api/v1/history")
